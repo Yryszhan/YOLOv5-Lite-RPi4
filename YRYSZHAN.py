@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 import sys
 import time
@@ -11,21 +8,16 @@ import pyttsx3
 import pyaudio
 import re
 from datetime import datetime
-
-# ---- YOLOv5-Lite utils (из твоего репо) ----
 from models.experimental import attempt_load
 from utils.datasets import LoadImages
 from utils.general import check_img_size, non_max_suppression, scale_coords
 from utils.torch_utils import select_device
-
-# ---- Vosk ----
 from vosk import Model as VoskModel, KaldiRecognizer
 
-# ===================== НАСТРОЙКИ =====================
 IMAGE_PATH = 'input.jpg'
-WEIGHTS = 'v5lite-s.pt'      # или свой путь к best.pt
+WEIGHTS = 'v5lite-s.pt'     
 IMG_SIZE = 320
-DEVICE = 'cpu'               # на Raspberry Pi оставь 'cpu'
+DEVICE = 'cpu'             
 CONF_THRES = 0.25
 IOU_THRES  = 0.45
 
@@ -33,20 +25,17 @@ VOSK_MODEL_DIR = "models/vosk-model-small-ru-0.22"
 SAMPLE_RATE = 16000
 CHUNK_SIZE  = 8192
 CHANNELS    = 1
-MIC_INDEX   = None  # None = микрофон по умолчанию; иначе укажи индекс
+MIC_INDEX   = None  
 
 WAKE_PHRASES = ("вперед", "вперёд", "что впереди есть", "что впереди")
 SILENCE_AFTER_SPEAK_SEC = 0.3
 
-# Состояния/настройки ассистента
 VOLUME_INIT = 0.8
 TTS_MUTED = False
 CONTINUOUS_MODE = False
-CONTINUOUS_PERIOD = 3.0  # сек между авто-детекциями
-CONF_THRES_VAR = CONF_THRES  # динамический порог
-# =====================================================
+CONTINUOUS_PERIOD = 3.0  
+CONF_THRES_VAR = CONF_THRES 
 
-# Перевод названий классов
 TRANSLATE = {
     "person":"человек","bicycle":"велосипед","car":"машина","motorcycle":"мотоцикл","airplane":"самолёт",
     "bus":"автобус","train":"поезд","truck":"грузовик","boat":"лодка","traffic light":"светофор",
@@ -64,10 +53,9 @@ TRANSLATE = {
     "scissors":"ножницы","teddy bear":"плюшевый мишка","hair drier":"фен","toothbrush":"зубная щётка"
 }
 
-# ---------- Голос ----------
 def init_tts_engine():
     engine = pyttsx3.init()
-    engine.setProperty('voice', 'ru')   # жёстко RU
+    engine.setProperty('voice', 'ru')   
     engine.setProperty('rate', 150)
     engine.setProperty('volume', VOLUME_INIT)  # 0.0..1.0
     return engine
@@ -82,13 +70,12 @@ def speak(engine, text):
     engine.runAndWait()
     time.sleep(SILENCE_AFTER_SPEAK_SEC)
 
-# ---------- Камера ----------
 def capture_image():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[CAMERA] Не удалось открыть камеру")
         return None
-    # прогрев
+
     time.sleep(0.3)
     for _ in range(5):
         cap.read()
@@ -102,7 +89,6 @@ def capture_image():
     print(f"[CAMERA] Снимок сохранён: {IMAGE_PATH}")
     return IMAGE_PATH
 
-# ---------- YOLO ----------
 def init_yolo():
     device = select_device(DEVICE)
     yolo_model = attempt_load(WEIGHTS, map_location=device)
@@ -144,7 +130,6 @@ def run_detection(image_path, yolo_model, device, stride, imgsz, names):
     translated = [TRANSLATE.get(o, o) for o in unique]
     return "Будьте внимательны! Впереди есть " + ", ".join(translated) + "."
 
-# ---------- ASR (Vosk) ----------
 def init_asr():
     if not os.path.isdir(VOSK_MODEL_DIR):
         print(f"[VOSK] Модель не найдена: {VOSK_MODEL_DIR}")
@@ -165,7 +150,6 @@ def phrase_triggers(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(p in t for p in WAKE_PHRASES)
 
-# ---------- Вспомогательные действия ----------
 def say_time(tts):
     now = datetime.now()
     speak(tts, f"Сейчас {now.strftime('%H:%M')}.")
@@ -188,8 +172,7 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
 
     t = (text or "").lower().strip()
 
-    # Управление речью
-    if any(w in t for w in ("тихо", "замолчи")):
+    if any(w in t for w in ("стоп" , "тихо", "замолчи")):
         TTS_MUTED = True
         print("[TTS] muted")
         return True
@@ -198,7 +181,6 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
         speak(tts, "Голос включён.")
         return True
 
-    # Громкость
     if "громче" in t:
         set_volume(tts, delta=+0.1); return True
     if "тише" in t:
@@ -210,18 +192,15 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
             set_volume(tts, absolute=max(0, min(100, pct))/100.0)
             return True
 
-    # Время
     if "скажи время" in t or "который час" in t:
         say_time(tts); return True
 
-    # Фото
     if "сделай фото" in t or "сфотографируй" in t:
         path = capture_image()
         if path:
             speak(tts, "Фото сохранено.")
         return True
 
-    # Потоковый режим
     if "режим поток" in t or "авто режим" in t or "потоковый режим" in t:
         if any(w in t for w in ("выключи", "отключи", "стоп")):
             CONTINUOUS_MODE = False
@@ -230,7 +209,7 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
             CONTINUOUS_MODE = True
             speak(tts, f"Потоковый режим включён. Интервал {int(CONTINUOUS_PERIOD)} секунд.")
         return True
-# Сколько людей
+
     if "сколько людей" in t:
         path = capture_image()
         if path:
@@ -239,15 +218,12 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
             speak(tts, f"Я вижу {n} " + ("человека." if 1 <= n <= 4 else "человек."))
         return True
 
-    # Выход
     if "выход" in t or "заверши" in t or "закрыть" in t:
         speak(tts, "Выход.")
         return "EXIT"
 
-    # Нет специальных команд
     return False
 
-# ===================== MAIN =====================
 def main():
     print("[INIT] Загружаю YOLOv5-Lite...")
     yolo_model, device, stride, imgsz, names = init_yolo()
@@ -262,7 +238,6 @@ def main():
 
     try:
         while True:
-            # Авто-детекция в потоковом режиме
             if CONTINUOUS_MODE and (time.time() - last_auto) >= CONTINUOUS_PERIOD:
                 path = capture_image()
                 if path:
@@ -270,7 +245,6 @@ def main():
                     speak(tts, msg)
                 last_auto = time.time()
 
-            # Слушаем микрофон
             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
             if asr.AcceptWaveform(data):
@@ -279,14 +253,12 @@ def main():
                 if text:
                     print("\r[YOU] " + text)
 
-                    # Сначала команды
                     res = handle_command(text, tts, yolo_model, device, stride, imgsz, names)
                     if res == "EXIT":
                         break
                     if res is True:
-                        continue  # команда обработана
+                        continue  
 
-                    # Если это фраза-активатор — делаем детекцию
                     if phrase_triggers(text):
                         path = capture_image()
                         if path:
