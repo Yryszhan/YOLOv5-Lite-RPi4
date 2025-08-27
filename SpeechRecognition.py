@@ -10,7 +10,6 @@ import pyaudio
 import io
 from vosk import Model, KaldiRecognizer
 
-# Path to the Vosk model
 #model_path = "models/vosk-odel-small-pl-0.22/"
 model_path = "models/vosk-model-small-ru-0.22/"
 if not os.path.exists(model_path):
@@ -19,13 +18,11 @@ if not os.path.exists(model_path):
 
 model = Model(model_path)
 
-# Settings for PyAudio
 sample_rate = 16000
 chunk_size = 8192
 format = pyaudio.paInt16
 channels = 1
 
-# Initialization of PyAudio and speech recognition
 p = pyaudio.PyAudio()
 stream = p.open(format=format, channels=channels, rate=sample_rate, input=True, frames_per_buffer=chunk_size)
 recognizer = KaldiRecognizer(model, sample_rate)

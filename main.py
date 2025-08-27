@@ -7,16 +7,12 @@ import torch
 import pyttsx3
 import pyaudio
 from pathlib import Path
-
 from models.experimental import attempt_load
 from utils.datasets import LoadImages
 from utils.general import check_img_size, non_max_suppression, scale_coords
 from utils.torch_utils import select_device
-
-# ---- Vosk ----
 from vosk import Model as VoskModel, KaldiRecognizer
 
-# ===================== НАСТРОЙКИ =====================
 IMAGE_PATH = 'input.jpg'
 WEIGHTS = 'v5lite-s.pt'     
 IMG_SIZE = 320
@@ -28,13 +24,11 @@ VOSK_MODEL_DIR = "models/vosk-model-small-ru-0.22"
 SAMPLE_RATE = 16000
 CHUNK_SIZE  = 8192
 CHANNELS    = 1
-MIC_INDEX   = None  # None = микрофон по умолчанию; иначе укажи индекс
+MIC_INDEX   = None  
 
 WAKE_PHRASES = ("вперед", "что впереди есть", "что впереди")
 SILENCE_AFTER_SPEAK_SEC = 0.3
-# =====================================================
 
-# Перевод названий классов
 TRANSLATE = {
     "person":"человек","bicycle":"велосипед","car":"машина","motorcycle":"мотоцикл","airplane":"самолёт",
     "bus":"автобус","train":"поезд","truck":"грузовик","boat":"лодка","traffic light":"светофор",
@@ -52,12 +46,11 @@ TRANSLATE = {
     "scissors":"ножницы","teddy bear":"плюшевый мишка","hair drier":"фен","toothbrush":"зубная щётка"
 }
 
-# ---------- Голос ----------
 def init_tts_engine():
     engine = pyttsx3.init()
-    engine.setProperty('voice', 'ru')   # жёстко ставим RU
+    engine.setProperty('voice', 'ru')  
     engine.setProperty('rate', 150)
-    return engine                       # ВАЖНО: вернуть движок!
+    return engine                     
 
 def speak(engine, text):
     print("[SAY] " + text)
@@ -65,13 +58,11 @@ def speak(engine, text):
     engine.runAndWait()
     time.sleep(SILENCE_AFTER_SPEAK_SEC)
 
-# ---------- Камера ----------
 def capture_image():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[CAMERA] Не удалось открыть камеру")
         return None
-    # прогрев
     time.sleep(0.3)
     for _ in range(5):
         cap.read()
@@ -85,7 +76,6 @@ def capture_image():
     print(f"[CAMERA] Снимок сохранён: {IMAGE_PATH}")
     return IMAGE_PATH
 
-# ---------- YOLO ----------
 def init_yolo():
     device = select_device(DEVICE)
     yolo_model = attempt_load(WEIGHTS, map_location=device)
@@ -121,7 +111,6 @@ def run_detection(image_path, yolo_model, device, stride, imgsz, names):
     translated = [TRANSLATE.get(o, o) for o in unique]
     return "Будьте внимательны! Впереди есть " + ", ".join(translated) + "."
 
-# ---------- ASR (Vosk) ----------
 def init_asr():
     if not os.path.isdir(VOSK_MODEL_DIR):
         print(f"[VOSK] Модель не найдена: {VOSK_MODEL_DIR}")
@@ -142,7 +131,6 @@ def phrase_triggers(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(p in t for p in WAKE_PHRASES)
 
-# ===================== MAIN =====================
 def main():
     print("[INIT] Загружаю YOLOv5-Lite...")
     yolo_model, device, stride, imgsz, names = init_yolo()
@@ -158,7 +146,6 @@ def main():
             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
             if asr.AcceptWaveform(data):
-                # полная фраза
                 r = json.loads(asr.Result())
                 text = r.get("text", "")
                 if text:
@@ -169,11 +156,9 @@ def main():
                             msg = run_detection(path, yolo_model, device, stride, imgsz, names)
                             speak(tts, msg)
             else:
-                # частичный результат
                 pr = json.loads(asr.PartialResult())
                 partial = pr.get("partial", "")
                 if partial:
-                    # показываем «живой» текст на одной строке
                     sys.stdout.write("\r[...]" + partial + "   ")
                     sys.stdout.flush()
 
