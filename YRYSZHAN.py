@@ -44,8 +44,11 @@ CONTINUOUS_PERIOD = 3.0
 CONF_THRES_VAR = CONF_THRES
 
 # Telegram (ЗАПОЛНИ!)
-TELEGRAM_TOKEN = "PASTE_BOT_TOKEN_HERE"  # напр. "123456789:ABCDEF..."
-TELEGRAM_CHAT_ID = "PASTE_CHAT_ID_HERE"  # твой chat_id или id группы
+
+#bot token 8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8
+#telegram bot 1357544035
+TELEGRAM_TOKEN = "8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8"  # напр. "123456789:ABCDEF..."
+TELEGRAM_CHAT_ID = "1357544035"  # твой chat_id или id группы
 
 # GPS (через NEO-6 на GPIO UART)
 GPS_PORT = "/dev/serial0"
