@@ -45,8 +45,8 @@ CONTINUOUS_PERIOD = 3.0
 CONF_THRES_VAR = CONF_THRES
 
 # Telegram — из переменных окружения
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = "8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8"
+TELEGRAM_CHAT_ID = "1357544035"
 
 # GPS (через NEO-6 на GPIO UART)
 GPS_PORT = "/dev/serial0"
@@ -55,7 +55,7 @@ GPS_READ_TIMEOUT = 8.0  # сек ждать фикса
 
 # ===== HC-SR04 (РАДАР) =====
 # Пины BCM: TRIG -> GPIO23, ECHO -> GPIO24 (ECHO через делитель до 3.3В!)
-SONAR_TRIG = 23
+SONAR_TRIG = 25
 SONAR_ECHO = 24
 RADAR_ENABLED = False
 RADAR_PERIOD = 0.5         # как часто опрашивать сонар, сек
@@ -406,7 +406,7 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
         return True
 
     # --- continuous mode ---
-    if "режим поток" in t или "авто режим" in t or "потоковый режим" in t:
+    if "режим поток" in t or "авто режим" in t or "потоковый режим" in t:
         if any(w in t for w in ("выключи", "отключи", "стоп")):
             CONTINUOUS_MODE = False
             speak(tts, "Потоковый режим выключен.")
