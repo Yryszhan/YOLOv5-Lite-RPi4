@@ -6,8 +6,7 @@ import cv2
 import torch
 import pyttsx3
 import pyaudio
-import re
-from datetime import datetime
+from pathlib import Path
 from models.experimental import attempt_load
 from utils.datasets import LoadImages
 from utils.general import check_img_size, non_max_suppression, scale_coords
@@ -17,7 +16,7 @@ from vosk import Model as VoskModel, KaldiRecognizer
 IMAGE_PATH = 'input.jpg'
 WEIGHTS = 'v5lite-s.pt'     
 IMG_SIZE = 320
-DEVICE = 'cpu'             
+DEVICE = 'cpu'              
 CONF_THRES = 0.25
 IOU_THRES  = 0.45
 
@@ -27,14 +26,8 @@ CHUNK_SIZE  = 8192
 CHANNELS    = 1
 MIC_INDEX   = None  
 
-WAKE_PHRASES = ("вперед", "вперёд", "что впереди есть", "что впереди")
+WAKE_PHRASES = ("вперед", "что впереди есть", "что впереди")
 SILENCE_AFTER_SPEAK_SEC = 0.3
-
-VOLUME_INIT = 0.8
-TTS_MUTED = False
-CONTINUOUS_MODE = False
-CONTINUOUS_PERIOD = 3.0  
-CONF_THRES_VAR = CONF_THRES 
 
 TRANSLATE = {
     "person":"человек","bicycle":"велосипед","car":"машина","motorcycle":"мотоцикл","airplane":"самолёт",
@@ -55,16 +48,11 @@ TRANSLATE = {
 
 def init_tts_engine():
     engine = pyttsx3.init()
-    engine.setProperty('voice', 'ru')   
+    engine.setProperty('voice', 'ru')  
     engine.setProperty('rate', 150)
-    engine.setProperty('volume', VOLUME_INIT)  # 0.0..1.0
-    return engine
+    return engine                     
 
 def speak(engine, text):
-    global TTS_MUTED
-    if TTS_MUTED:
-        print("[MUTED]", text)
-        return
     print("[SAY] " + text)
     engine.say(text)
     engine.runAndWait()
@@ -75,7 +63,6 @@ def capture_image():
     if not cap.isOpened():
         print("[CAMERA] Не удалось открыть камеру")
         return None
-
     time.sleep(0.3)
     for _ in range(5):
         cap.read()
@@ -98,9 +85,7 @@ def init_yolo():
     names = yolo_model.module.names if hasattr(yolo_model, 'module') else yolo_model.names
     return yolo_model, device, stride, imgsz, names
 
-def detect_raw(image_path, yolo_model, device, stride, imgsz, names, conf_thres=None):
-    if conf_thres is None:
-        conf_thres = CONF_THRES_VAR
+def run_detection(image_path, yolo_model, device, stride, imgsz, names):
     dataset = LoadImages(image_path, img_size=imgsz, stride=stride)
     found = []
     for path, img, im0, _ in dataset:
@@ -111,7 +96,7 @@ def detect_raw(image_path, yolo_model, device, stride, imgsz, names, conf_thres=
         t1 = time.time()
         with torch.no_grad():
             pred = yolo_model(img)[0]
-            pred = non_max_suppression(pred, conf_thres=conf_thres, iou_thres=IOU_THRES)
+            pred = non_max_suppression(pred, conf_thres=CONF_THRES, iou_thres=IOU_THRES)
         t2 = time.time()
         for det in pred:
             if len(det):
@@ -120,10 +105,6 @@ def detect_raw(image_path, yolo_model, device, stride, imgsz, names, conf_thres=
                     label = names[int(cls)]
                     found.append(label)
         print(f"[YOLO] Детекция заняла {(t2 - t1):.3f} сек.")
-    return found
-
-def run_detection(image_path, yolo_model, device, stride, imgsz, names):
-    found = detect_raw(image_path, yolo_model, device, stride, imgsz, names)
     if not found:
         return "Впереди ничего не обнаружено."
     unique = sorted(set(found))
@@ -150,80 +131,6 @@ def phrase_triggers(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(p in t for p in WAKE_PHRASES)
 
-def say_time(tts):
-    now = datetime.now()
-    speak(tts, f"Сейчас {now.strftime('%H:%M')}.")
-
-def set_volume(tts, delta=None, absolute=None):
-    v = tts.getProperty('volume')
-    if absolute is not None:
-        v = max(0.0, min(1.0, absolute))
-    elif delta is not None:
-        v = max(0.0, min(1.0, v + delta))
-    tts.setProperty('volume', v)
-    speak(tts, f"Громкость {int(v*100)} процентов.")
-
-def count_people(found):
-    return sum(1 for x in found if x == "person")
-
-def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
-
-    global TTS_MUTED, CONTINUOUS_MODE, CONF_THRES_VAR
-
-    t = (text or "").lower().strip()
-
-    if any(w in t for w in ("стоп" , "тихо", "замолчи")):
-        TTS_MUTED = True
-        print("[TTS] muted")
-        return True
-    if any(w in t for w in ("говори", "включи голос", "озвучка")):
-        TTS_MUTED = False
-        speak(tts, "Голос включён.")
-        return True
-
-    if "громче" in t:
-        set_volume(tts, delta=+0.1); return True
-    if "тише" in t:
-        set_volume(tts, delta=-0.1); return True
-    if "громкость" in t:
-        m = re.search(r"громк(?:ость)?\s+(\d{1,3})", t)
-        if m:
-            pct = int(m.group(1))
-            set_volume(tts, absolute=max(0, min(100, pct))/100.0)
-            return True
-
-    if "скажи время" in t or "который час" in t:
-        say_time(tts); return True
-
-    if "сделай фото" in t or "сфотографируй" in t:
-        path = capture_image()
-        if path:
-            speak(tts, "Фото сохранено.")
-        return True
-
-    if "режим поток" in t or "авто режим" in t or "потоковый режим" in t:
-        if any(w in t for w in ("выключи", "отключи", "стоп")):
-            CONTINUOUS_MODE = False
-            speak(tts, "Потоковый режим выключен.")
-        else:
-            CONTINUOUS_MODE = True
-            speak(tts, f"Потоковый режим включён. Интервал {int(CONTINUOUS_PERIOD)} секунд.")
-        return True
-
-    if "сколько людей" in t:
-        path = capture_image()
-        if path:
-            found = detect_raw(path, yolo_model, device, stride, imgsz, names)
-            n = count_people(found)
-            speak(tts, f"Я вижу {n} " + ("человека." if 1 <= n <= 4 else "человек."))
-        return True
-
-    if "выход" in t or "заверши" in t or "закрыть" in t:
-        speak(tts, "Выход.")
-        return "EXIT"
-
-    return False
-
 def main():
     print("[INIT] Загружаю YOLOv5-Lite...")
     yolo_model, device, stride, imgsz, names = init_yolo()
@@ -234,17 +141,8 @@ def main():
     print("[INIT] ASR готов. Скажи: 'вперед' или 'что впереди есть'.")
 
     tts = init_tts_engine()
-    last_auto = 0.0
-
     try:
         while True:
-            if CONTINUOUS_MODE and (time.time() - last_auto) >= CONTINUOUS_PERIOD:
-                path = capture_image()
-                if path:
-                    msg = run_detection(path, yolo_model, device, stride, imgsz, names)
-                    speak(tts, msg)
-                last_auto = time.time()
-
             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
             if asr.AcceptWaveform(data):
@@ -252,13 +150,6 @@ def main():
                 text = r.get("text", "")
                 if text:
                     print("\r[YOU] " + text)
-
-                    res = handle_command(text, tts, yolo_model, device, stride, imgsz, names)
-                    if res == "EXIT":
-                        break
-                    if res is True:
-                        continue  
-
                     if phrase_triggers(text):
                         path = capture_image()
                         if path:
