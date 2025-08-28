@@ -7,8 +7,9 @@ import torch
 import pyttsx3
 import pyaudio
 import re
-import serial            # NEW
-import requests          # NEW
+import serial
+import requests
+import pigpio  # NEW
 from datetime import datetime
 from models.experimental import attempt_load
 from utils.datasets import LoadImages
@@ -43,17 +44,28 @@ CONTINUOUS_MODE = False
 CONTINUOUS_PERIOD = 3.0
 CONF_THRES_VAR = CONF_THRES
 
-# Telegram (ЗАПОЛНИ!)
-
-#bot token 8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8
-#telegram bot 1357544035
-TELEGRAM_TOKEN = "8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8"  # напр. "123456789:ABCDEF..."
-TELEGRAM_CHAT_ID = "1357544035"  # твой chat_id или id группы
+# Telegram
+TELEGRAM_TOKEN = "8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8"
+TELEGRAM_CHAT_ID = "1357544035"
 
 # GPS (через NEO-6 на GPIO UART)
 GPS_PORT = "/dev/serial0"
 GPS_BAUD = 9600
-GPS_READ_TIMEOUT = 8.0  # секунд ждать фикса
+GPS_READ_TIMEOUT = 8.0  # сек ждать фикса
+
+# ===== HC-SR04 (РАДАР) =====
+# Пины BCM: TRIG -> GPIO23, ECHO -> GPIO24 (ECHO через делитель до 3.3В!)
+SONAR_TRIG = 25
+SONAR_ECHO = 24
+RADAR_ENABLED = False
+RADAR_PERIOD = 0.5         # как часто опрашивать сонар, сек
+RADAR_SAY_COOLDOWN = 3.0   # не говорить слишком часто, сек
+RADAR_THRESHOLD_CM = 40.0  # порог
+RADAR_COMPARE_GT = True    # True: говорить если dist > THRESH (как ты попросил). False: если dist < THRESH
+TEMP_C = 20.0              # для скорости звука
+SOUND_SPEED = 331.3 + 0.606 * TEMP_C  # м/с
+
+PGPIO = None               # инстанс pigpio.pi()
 
 TRANSLATE = {
     "person":"человек","bicycle":"велосипед","car":"машина","motorcycle":"мотоцикл","airplane":"самолёт",
@@ -171,26 +183,8 @@ def phrase_triggers(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(p in t for p in WAKE_PHRASES)
 
-# ===================== УТИЛИТЫ =====================
-def say_time(tts):
-    now = datetime.now()
-    speak(tts, f"Сейчас {now.strftime('%H:%M')}.")
-
-def set_volume(tts, delta=None, absolute=None):
-    v = tts.getProperty('volume')
-    if absolute is not None:
-        v = max(0.0, min(1.0, absolute))
-    elif delta is not None:
-        v = max(0.0, min(1.0, v + delta))
-    tts.setProperty('volume', v)
-    speak(tts, f"Громкость {int(v*100)} процентов.")
-
-def count_people(found):
-    return sum(1 for x in found if x == "person")
-
-# ===================== GPS + Telegram (NEW) =====================
+# ===================== GPS + Telegram =====================
 def _dm_to_deg(dm: str, dir_letter: str):
-    """ddmm.mmmm -> signed degrees по N/S/E/W"""
     if not dm:
         return None
     try:
@@ -205,10 +199,6 @@ def _dm_to_deg(dm: str, dir_letter: str):
     return dec
 
 def get_current_gps(timeout_s: float = GPS_READ_TIMEOUT):
-    """
-    Читает /dev/serial0 и пытается получить валидные координаты по $GPRMC/$GNRMC (status A)
-    или $GPGGA/$GNGGA (gps_qual >= 1). Возвращает (lat, lon) или None.
-    """
     end = time.time() + max(1.0, timeout_s)
     last_candidate = None
     try:
@@ -217,18 +207,16 @@ def get_current_gps(timeout_s: float = GPS_READ_TIMEOUT):
                 line = ser.readline().decode(errors="ignore").strip()
                 if not line.startswith("$"):
                     continue
-                # RMC — предпочитаем валидные
                 if line.startswith(("$GPRMC", "$GNRMC")):
                     parts = line.split(",")
                     if len(parts) >= 7:
-                        status = parts[2]  # A=valid, V=void
+                        status = parts[2]
                         lat = _dm_to_deg(parts[3], parts[4] if len(parts) > 4 else "")
                         lon = _dm_to_deg(parts[5], parts[6] if len(parts) > 6 else "")
                         if lat is not None and lon is not None:
                             last_candidate = (lat, lon)
                             if status == "A":
                                 return (lat, lon)
-                # GGA — годится при gps_qual >= 1
                 elif line.startswith(("$GPGGA", "$GNGGA")):
                     parts = line.split(",")
                     if len(parts) >= 7:
@@ -245,11 +233,10 @@ def get_current_gps(timeout_s: float = GPS_READ_TIMEOUT):
     except Exception as e:
         print(f"[GPS] Ошибка доступа к {GPS_PORT}: {e}")
         return None
-    return last_candidate  # если нет валидного — вернём последнее кандидата, может быть None
+    return last_candidate
 
 def send_telegram_help(lat: float=None, lon: float=None):
-    """Отправка сообщения в Telegram с ссылкой на карту (если есть координаты)."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or "PASTE_" in TELEGRAM_TOKEN:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[TG] Заполни TELEGRAM_TOKEN и TELEGRAM_CHAT_ID!")
         return False
     text = "Мне нужна помощь!"
@@ -258,7 +245,6 @@ def send_telegram_help(lat: float=None, lon: float=None):
         text += f"\nКоординаты: {lat:.6f}, {lon:.6f}\n{link}"
     else:
         text += "\nКоординаты не получены."
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         r = requests.post(url, data={
@@ -277,13 +263,73 @@ def send_telegram_help(lat: float=None, lon: float=None):
         print(f"[TG] Ошибка отправки: {e}")
         return False
 
+# ===================== SONAR (HC-SR04) =====================
+def init_sonar():
+    """Инициализация pigpio и пинов. Возвращает True/False."""
+    global PGPIO
+    try:
+        PGPIO = pigpio.pi()
+    except Exception as e:
+        print(f"[SONAR] pigpio.pi() ошибка: {e}")
+        PGPIO = None
+        return False
+    if not PGPIO or not PGPIO.connected:
+        print("[SONAR] pigpio не подключён. Запусти: sudo systemctl start pigpiod")
+        PGPIO = None
+        return False
+    PGPIO.set_mode(SONAR_TRIG, pigpio.OUTPUT)
+    PGPIO.set_mode(SONAR_ECHO, pigpio.INPUT)
+    PGPIO.write(SONAR_TRIG, 0)
+    time.sleep(0.05)
+    print("[SONAR] Инициализировано.")
+    return True
+
+def sonar_distance_cm_once(timeout_s=0.04):
+    """Одно измерение. Возвращает расстояние в см или None при таймауте."""
+    if not PGPIO:
+        return None
+    # 10 мкс импульс на TRIG
+    PGPIO.gpio_trigger(SONAR_TRIG, 10, 1)
+    t0 = time.time()
+
+    # Ждём фронт на ECHO
+    while PGPIO.read(SONAR_ECHO) == 0:
+        if time.time() - t0 > timeout_s:
+            return None
+    t1 = PGPIO.get_current_tick()
+
+    # Ждём спад на ECHO
+    while PGPIO.read(SONAR_ECHO) == 1:
+        if time.time() - t0 > timeout_s:
+            return None
+    t2 = PGPIO.get_current_tick()
+
+    us = pigpio.tickDiff(t1, t2)
+    secs = us / 1e6
+    dist_m = SOUND_SPEED * secs / 2.0
+    return dist_m * 100.0  # см
+
+def sonar_distance_cm(samples=3, pause=0.02):
+    """Медиана нескольких измерений (устойчивее)."""
+    vals = []
+    for _ in range(samples):
+        d = sonar_distance_cm_once()
+        if d is not None:
+            vals.append(d)
+        time.sleep(pause)
+    if not vals:
+        return None
+    vals.sort()
+    mid = vals[len(vals)//2]
+    return round(mid, 1)
+
 # ===================== ОБРАБОТКА КОМАНД =====================
 def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
-    global TTS_MUTED, CONTINUOUS_MODE, CONF_THRES_VAR
+    global TTS_MUTED, CONTINUOUS_MODE, RADAR_ENABLED
 
     t = (text or "").lower().strip()
 
-    # --- SOS команды (NEW) ---
+    # --- SOS команды ---
     if "мне нужна помощь" in t or re.search(r"\bпомощь\b", t):
         speak(tts, "Получаю координаты и отправляю сообщение в Телеграм.")
         coords = get_current_gps()
@@ -297,6 +343,22 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
             speak(tts, "Готово. Сообщение отправлено.")
         else:
             speak(tts, "Ошибка отправки. Проверь интернет и настройки Telegram.")
+        return True
+
+    # --- РАДАР: включить/выключить ---
+    if any(kw in t for kw in ("включить радар", "включи радар", "включить сонар", "включи сонар")):
+        if PGPIO or init_sonar():
+            RADAR_ENABLED = True
+            speak(tts, "Радар включен.")
+        else:
+            RADAR_ENABLED = False
+            speak(tts, "Радар недоступен. Запусти pigpio.")
+        return True
+
+    if any(kw in t for kw in ("выключить радар", "отключить радар", "выключи радар", "отключи радар",
+                               "выключить сонар", "отключить сонар", "выключи сонар", "отключи сонар")):
+        RADAR_ENABLED = False
+        speak(tts, "Радар выключен.")
         return True
 
     # --- mute/unmute ---
@@ -347,7 +409,7 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
         path = capture_image()
         if path:
             found = detect_raw(path, yolo_model, device, stride, imgsz, names)
-            n = count_people(found)
+            n = sum(1 for x in found if x == "person")
             speak(tts, f"Я вижу {n} " + ("человека." if 1 <= n <= 4 else "человек."))
         return True
 
@@ -357,6 +419,20 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
         return "EXIT"
 
     return False
+
+# ===================== УТИЛИТЫ =====================
+def say_time(tts):
+    now = datetime.now()
+    speak(tts, f"Сейчас {now.strftime('%H:%M')}.")
+
+def set_volume(tts, delta=None, absolute=None):
+    v = tts.getProperty('volume')
+    if absolute is not None:
+        v = max(0.0, min(1.0, absolute))
+    elif delta is not None:
+        v = max(0.0, min(1.0, v + delta))
+    tts.setProperty('volume', v)
+    speak(tts, f"Громкость {int(v*100)} процентов.")
 
 # ===================== MAIN =====================
 def main():
@@ -369,19 +445,38 @@ def main():
     print("[INIT] ASR готов. Скажи: 'вперед' или 'что впереди есть'.")
 
     tts = init_tts_engine()
+
+    # Попробуем инициализировать сонар сразу (не обязательно)
+    init_sonar()
+
     last_auto = 0.0
+    last_radar_poll = 0.0
+    last_radar_talk = 0.0
 
     try:
         while True:
-            # авто-детекция в потоке
-            if CONTINUOUS_MODE and (time.time() - last_auto) >= CONTINUOUS_PERIOD:
+            now = time.time()
+
+            # --- РАДАР: периодический опрос ---
+            if RADAR_ENABLED and PGPIO and (now - last_radar_poll) >= RADAR_PERIOD:
+                d = sonar_distance_cm()
+                if d is not None:
+                    # Условие как ты просил: говорить, если d > порога
+                    trig = (d < RADAR_THRESHOLD_CM)
+                    if trig and (now - last_radar_talk) >= RADAR_SAY_COOLDOWN:
+                        speak(tts, "У вас впереди есть стена.")
+                        last_radar_talk = now
+                last_radar_poll = now
+
+            # --- авто-детекция YOLO в потоке ---
+            if CONTINUOUS_MODE and (now - last_auto) >= CONTINUOUS_PERIOD:
                 path = capture_image()
                 if path:
                     msg = run_detection(path, yolo_model, device, stride, imgsz, names)
                     speak(tts, msg)
-                last_auto = time.time()
+                last_auto = now
 
-            # слушаем микрофон
+            # --- слушаем микрофон ---
             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
             if asr.AcceptWaveform(data):
@@ -418,6 +513,8 @@ def main():
             pa.terminate()
         except Exception:
             pass
+        if PGPIO:
+            PGPIO.stop()
 
 if __name__ == "__main__":
     main()
