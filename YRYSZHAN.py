@@ -9,7 +9,7 @@ import pyaudio
 import re
 import serial
 import requests
-import pigpio  # NEW
+import pigpio
 from datetime import datetime
 from models.experimental import attempt_load
 from utils.datasets import LoadImages
@@ -44,9 +44,9 @@ CONTINUOUS_MODE = False
 CONTINUOUS_PERIOD = 3.0
 CONF_THRES_VAR = CONF_THRES
 
-# Telegram
-TELEGRAM_TOKEN = "8229742524:AAGd7YKbLzEE7lKODD4Ra6OisYPwdj9utN8"
-TELEGRAM_CHAT_ID = "1357544035"
+# Telegram — из переменных окружения
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # GPS (через NEO-6 на GPIO UART)
 GPS_PORT = "/dev/serial0"
@@ -55,15 +55,16 @@ GPS_READ_TIMEOUT = 8.0  # сек ждать фикса
 
 # ===== HC-SR04 (РАДАР) =====
 # Пины BCM: TRIG -> GPIO23, ECHO -> GPIO24 (ECHO через делитель до 3.3В!)
-SONAR_TRIG = 25
+SONAR_TRIG = 23
 SONAR_ECHO = 24
 RADAR_ENABLED = False
 RADAR_PERIOD = 0.5         # как часто опрашивать сонар, сек
 RADAR_SAY_COOLDOWN = 3.0   # не говорить слишком часто, сек
-RADAR_THRESHOLD_CM = 40.0  # порог
-RADAR_COMPARE_GT = True    # True: говорить если dist > THRESH (как ты попросил). False: если dist < THRESH
+RADAR_THRESHOLD_CM = 40.0  # порог (говорить, если ближе)
+RADAR_DEBUG = True         # печатать измеренную дистанцию/таймауты
 TEMP_C = 20.0              # для скорости звука
 SOUND_SPEED = 331.3 + 0.606 * TEMP_C  # м/с
+GLITCH_US = 150            # подавление дребезга ECHO (микросекунды)
 
 PGPIO = None               # инстанс pigpio.pi()
 
@@ -251,17 +252,26 @@ def send_telegram_help(lat: float=None, lon: float=None):
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
             "disable_web_page_preview": True
-        }, timeout=8)
+        }, timeout=15)
         ok = False
+        desc = r.text[:160]
         try:
-            ok = r.status_code == 200 and r.json().get("ok", False)
+            jr = r.json()
+            ok = jr.get("ok", False)
+            desc = jr.get("description", desc)
         except Exception:
             pass
-        print(f"[TG] status={r.status_code} ok={ok} body={r.text[:160]}")
+        print(f"[TG] status={r.status_code} ok={ok} desc={desc}")
         return ok
+    except requests.exceptions.SSLError as e:
+        print(f"[TG] SSL error: {e}  (проверь время системы и сертификаты)")
+    except requests.exceptions.ConnectTimeout:
+        print("[TG] Timeout: не удалось подключиться к api.telegram.org")
+    except requests.exceptions.ConnectionError as e:
+        print(f"[TG] ConnectionError: {e}  (интернет/прокси/DNS)")
     except Exception as e:
-        print(f"[TG] Ошибка отправки: {e}")
-        return False
+        print(f"[TG] Unexpected error: {e}")
+    return False
 
 # ===================== SONAR (HC-SR04) =====================
 def init_sonar():
@@ -279,12 +289,13 @@ def init_sonar():
         return False
     PGPIO.set_mode(SONAR_TRIG, pigpio.OUTPUT)
     PGPIO.set_mode(SONAR_ECHO, pigpio.INPUT)
+    PGPIO.set_glitch_filter(SONAR_ECHO, GLITCH_US)  # подавление дребезга
     PGPIO.write(SONAR_TRIG, 0)
     time.sleep(0.05)
     print("[SONAR] Инициализировано.")
     return True
 
-def sonar_distance_cm_once(timeout_s=0.04):
+def sonar_distance_cm_once(timeout_s=0.06):
     """Одно измерение. Возвращает расстояние в см или None при таймауте."""
     if not PGPIO:
         return None
@@ -395,7 +406,7 @@ def handle_command(text, tts, yolo_model, device, stride, imgsz, names):
         return True
 
     # --- continuous mode ---
-    if "режим поток" in t or "авто режим" in t or "потоковый режим" in t:
+    if "режим поток" in t или "авто режим" in t or "потоковый режим" in t:
         if any(w in t for w in ("выключи", "отключи", "стоп")):
             CONTINUOUS_MODE = False
             speak(tts, "Потоковый режим выключен.")
@@ -461,11 +472,15 @@ def main():
             if RADAR_ENABLED and PGPIO and (now - last_radar_poll) >= RADAR_PERIOD:
                 d = sonar_distance_cm()
                 if d is not None:
-                    # Условие как ты просил: говорить, если d > порога
-                    trig = (d < RADAR_THRESHOLD_CM)
-                    if trig and (now - last_radar_talk) >= RADAR_SAY_COOLDOWN:
+                    if RADAR_DEBUG:
+                        print(f"[RADAR] d={d:.1f} cm  thr={RADAR_THRESHOLD_CM}")
+                    # говорим, когда ближе порога (и не слишком часто)
+                    if 2.0 <= d < RADAR_THRESHOLD_CM and (now - last_radar_talk) >= RADAR_SAY_COOLDOWN:
                         speak(tts, "У вас впереди есть стена.")
                         last_radar_talk = now
+                else:
+                    if RADAR_DEBUG:
+                        print("[RADAR] timeout")
                 last_radar_poll = now
 
             # --- авто-детекция YOLO в потоке ---
